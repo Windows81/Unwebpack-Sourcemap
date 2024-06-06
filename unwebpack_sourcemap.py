@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-    unwebpack_sourcemap.py
-    by rarecoil (github.com/rarecoil/unwebpack-sourcemap)
+unwebpack_sourcemap.py
+by rarecoil (github.com/rarecoil/unwebpack-sourcemap)
 
-    Reads Webpack source maps and extracts the disclosed
-    uncompiled/commented source code for review. Can detect and
-    attempt to read sourcemaps from Webpack bundles with the `-d`
-    flag. Puts source into a directory structure similar to dev.
+Reads Webpack source maps and extracts the disclosed
+uncompiled/commented source code for review. Can detect and
+attempt to read sourcemaps from Webpack bundles with the `-d`
+flag. Puts source into a directory structure similar to dev.
 """
 
 import argparse
@@ -17,10 +17,13 @@ import string
 import sys
 from urllib.parse import urlparse
 from unicodedata import normalize
-
 import requests
 from bs4 import BeautifulSoup, SoupStrainer
+import logging
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class SourceMapExtractor:
     """Primary SourceMapExtractor class. Feed this arguments."""
@@ -69,7 +72,7 @@ class SourceMapExtractor:
             file, ext = os.path.splitext(parsed.path)
             self._target = target
             if ext != '.map' and not self._attempt_sourcemap_detection:
-                print("WARNING: URI does not have .map extension, and --detect is not flagged.")
+                logger.warning("URI does not have .map extension, and --detect is not flagged.")
 
     def _parse_remote_sourcemap(self, uri):
         """GET a remote sourcemap and parse it."""
@@ -77,15 +80,14 @@ class SourceMapExtractor:
         if data:
             self._parse_sourcemap(data, True)
         else:
-            print(f"WARNING: Could not retrieve sourcemap from URI {final_uri}")
+            logger.warning(f"Could not retrieve sourcemap from URI {final_uri}")
 
     def _detect_js_sourcemaps(self, uri):
         """Pull HTML and attempt to find JS files, then read the JS files and look for sourceMappingURL."""
         remote_sourcemaps = []
         data, final_uri = self._get_remote_data(uri)
 
-        # TODO: scan to see if this is a sourcemap instead of assuming HTML
-        print(f"Detecting sourcemaps in HTML at {final_uri}")
+        logger.info(f"Detecting sourcemaps in HTML at {final_uri}")
         script_strainer = SoupStrainer("script", src=True)
         try:
             soup = BeautifulSoup(data, "html.parser", parse_only=script_strainer)
@@ -98,14 +100,15 @@ class SourceMapExtractor:
             next_target_uri = source if parsed_uri.scheme else urlparse(final_uri)._replace(path=source).geturl()
 
             js_data, last_target_uri = self._get_remote_data(next_target_uri)
-            last_line = js_data.rstrip().split("\n")[-1]
-            matches = re.search(r"\/\/#\s*sourceMappingURL=(.*)$", last_line)
-            if matches:
-                asset = matches.group(1).strip()
-                asset_target = urlparse(asset)
-                asset_uri = asset if asset_target.scheme else urlparse(last_target_uri)._replace(path=os.path.join(os.path.dirname(urlparse(last_target_uri).path), asset)).geturl()
-                print(f"Detected sourcemap at remote location {asset_uri}")
-                remote_sourcemaps.append(asset_uri)
+            if js_data:
+                last_line = js_data.rstrip().split("\n")[-1]
+                matches = re.search(r"\/\/#\s*sourceMappingURL=(.*)$", last_line)
+                if matches:
+                    asset = matches.group(1).strip()
+                    asset_target = urlparse(asset)
+                    asset_uri = asset if asset_target.scheme else urlparse(last_target_uri)._replace(path=os.path.join(os.path.dirname(urlparse(last_target_uri).path), asset)).geturl()
+                    logger.info(f"Detected sourcemap at remote location {asset_uri}")
+                    remote_sourcemaps.append(asset_uri)
 
         return remote_sourcemaps
 
@@ -113,31 +116,31 @@ class SourceMapExtractor:
         map_data = target if is_str else (open(target, 'r', encoding='utf-8', errors='ignore').read() if os.path.isfile(target) else None)
 
         if not map_data:
-            print(f"ERROR: Failed to parse sourcemap {target}. Are you sure this is a sourcemap?")
+            logger.error(f"Failed to parse sourcemap {target}. Are you sure this is a sourcemap?")
             return False
 
         try:
             map_object = json.loads(map_data)
         except json.JSONDecodeError:
-            print(f"ERROR: Failed to parse sourcemap {target}. Are you sure this is a sourcemap?")
+            logger.error(f"Failed to parse sourcemap {target}. Are you sure this is a sourcemap?")
             return False
 
         if 'sources' not in map_object or 'sourcesContent' not in map_object:
-            print("ERROR: Sourcemap does not contain sources and/or sourcesContent, cannot extract.")
+            logger.error("Sourcemap does not contain sources and/or sourcesContent, cannot extract.")
             return False
 
         if len(map_object['sources']) != len(map_object['sourcesContent']):
-            print("WARNING: sources != sourcesContent, filenames may not match content")
+            logger.warning("sources != sourcesContent, filenames may not match content")
 
         for source, content in zip(map_object['sources'], map_object['sourcesContent']):
             write_path = self._get_sanitised_file_path(source)
             if write_path:
                 os.makedirs(os.path.dirname(write_path), mode=0o755, exist_ok=True)
                 with open(write_path, 'w', encoding='utf-8', errors='ignore', newline='') as f:
-                    print(f"Writing {os.path.basename(write_path)}...")
+                    logger.info(f"Writing {os.path.basename(write_path)}...")
                     f.write(content)
             else:
-                print(f"ERROR: Could not sanitize path {source}")
+                logger.error(f"Could not sanitize path {source}")
 
     def _get_sanitised_file_path(self, sourcePath):
         """Sanitise webpack paths for separators/relative paths"""
@@ -145,7 +148,7 @@ class SourceMapExtractor:
         exts = sourcePath.split(" ")
 
         if exts[0] == "external":
-            print(f"WARNING: Found external sourcemap {exts[1]}, not currently supported. Skipping")
+            logger.warning(f"Found external sourcemap {exts[1]}, not currently supported. Skipping")
             return None
 
         path, filename = os.path.split(sourcePath)
@@ -153,6 +156,10 @@ class SourceMapExtractor:
             path = path[2:]
         elif path.startswith('../'):
             path = 'parent_dir/' + path[3:]
+
+        # Ensure empty paths are named properly
+        if not path:
+            path = self._path_sanitiser.get_next_empty_name()
 
         filepath = self._path_sanitiser.make_valid_file_path(path, filename)
         return filepath
@@ -162,13 +169,13 @@ class SourceMapExtractor:
         try:
             result = requests.get(uri, verify=not self.disable_verify_ssl)
         except requests.RequestException as e:
-            print(f"WARNING: Could not retrieve {uri}: {e}")
+            logger.warning(f"Could not retrieve {uri}: {e}")
             return None, uri
 
         if result.status_code == 200:
             return result.text, result.url
         else:
-            print(f"WARNING: Got status code {result.status_code} for URI {result.url}")
+            logger.warning(f"Got status code {result.status_code} for URI {result.url}")
             return None, result.url
 
 
@@ -194,16 +201,15 @@ class PathSanitiser:
             valid_filename = valid_filename.replace(sep, '_')
         valid_chars = "-_.() {}{}".format(string.ascii_letters, string.digits)
         valid_filename = "".join(ch for ch in valid_filename if ch in valid_chars)
-        if not any(ch in string.ascii_letters + string.digits for ch in potential_file_path_name):
-            valid_filename = f"{self.EMPTY_NAME}_{self.empty_idx}"
-            self.empty_idx += 1
+        # If the filename is empty after sanitization, use a default name
+        if not valid_filename:
+            valid_filename = "default_name"
         return valid_filename
 
     def get_root_path(self):
         filepath = os.path.abspath(self.root_path)
         if not filepath.endswith(os.path.sep):
             filepath += os.path.sep
-        self.ensure_directory_exists(filepath)
         return filepath
 
     def path_split_into_list(self, path):
@@ -231,10 +237,15 @@ class PathSanitiser:
         valid_path = self.get_root_path() + self.sanitise_filesystem_path(path)
         valid_file_name = self.sanitise_filesystem_name(filename)
         if not valid_file_name:
-            print(f"WARNING: Could not sanitize filename {filename}, skipping.")
+            logger.warning(f"Could not sanitize filename {filename}, skipping.")
             return None
         valid_file_path = os.path.join(valid_path, valid_file_name)
         return valid_file_path
+
+    def get_next_empty_name(self):
+        """Generate a unique empty directory name."""
+        self.empty_idx += 1
+        return f"{self.EMPTY_NAME}_{self.empty_idx}"
 
 
 class SourceMapExtractorError(Exception):
@@ -269,7 +280,7 @@ def main():
         extractor = SourceMapExtractor(options)
         extractor.run()
     except SourceMapExtractorError as err:
-        print(f"ERROR: {err.message}")
+        logger.error(err.message)
         sys.exit(1)
 
 
